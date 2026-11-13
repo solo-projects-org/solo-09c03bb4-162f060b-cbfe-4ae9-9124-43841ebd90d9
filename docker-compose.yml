@@ -1,0 +1,20 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # 数据目录（挂卷持久化）：SQLite 元数据 + 批次文件都在这里
+      DATA_DIR: /data
+      # 生成作业节流：每生成 100 行暂停 100ms，便于演示“生成中撤回”
+      GEN_CHUNK_ROWS: "100"
+      GEN_CHUNK_DELAY_MS: "100"
+      # 慢速下载节流（?slow=1 时生效）：每 1KB 暂停 300ms，示例批次约可下载 10 秒
+      SLOW_CHUNK_BYTES: "1024"
+      SLOW_CHUNK_DELAY_MS: "300"
+    volumes:
+      - followup_data:/data
+    restart: unless-stopped
+
+volumes:
+  followup_data:

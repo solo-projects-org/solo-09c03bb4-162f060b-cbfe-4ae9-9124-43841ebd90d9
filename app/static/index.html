@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>随访明细交付平台</title>
+<style>
+  :root { --bd:#d0d7de; --bg:#f6f8fa; --ok:#1a7f37; --bad:#cf222e; --warn:#9a6700; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         margin: 0; background: var(--bg); color: #1f2328; }
+  header { background: #0a3069; color: #fff; padding: 14px 24px; }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 4px 0 0; font-size: 12px; opacity: .8; }
+  main { max-width: 1080px; margin: 20px auto; padding: 0 16px; display: grid; gap: 16px; }
+  section { background: #fff; border: 1px solid var(--bd); border-radius: 8px; padding: 16px; }
+  h2 { margin: 0 0 12px; font-size: 15px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid var(--bd); padding: 6px 8px; text-align: left; }
+  th { background: var(--bg); }
+  button { cursor: pointer; border: 1px solid var(--bd); border-radius: 6px;
+           background: #fff; padding: 5px 12px; font-size: 13px; }
+  button:hover { background: var(--bg); }
+  button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+  .tag.ok { background: #dafbe1; color: var(--ok); }
+  .tag.bad { background: #ffebe9; color: var(--bad); }
+  .tag.warn { background: #fff8c5; color: var(--warn); }
+  .tag.info { background: #ddf4ff; color: #0969da; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  #log { background: #0d1117; color: #c9d1d9; border-radius: 6px; padding: 10px;
+         font-family: ui-monospace, monospace; font-size: 12px; height: 160px;
+         overflow-y: auto; white-space: pre-wrap; }
+  .hint { font-size: 12px; color: #57606a; }
+  a.dl { font-size: 13px; margin-right: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>随访明细交付平台</h1>
+  <p>导入随访 CSV → 勾选参与者生成交付批次 → 下载交付文件；撤回授权将中止相关生成/下载并永久封锁相关批次</p>
+</header>
+<main>
+  <section>
+    <h2>1. 导入随访数据（participant_id, visit_date, score）</h2>
+    <div class="row">
+      <input type="file" id="csvFile" accept=".csv">
+      <button class="primary" onclick="uploadCsv()">上传导入</button>
+      <button onclick="importSample()">导入内置示例数据</button>
+      <a class="dl" href="/static/sample_followups.csv" download>下载示例 CSV</a>
+      <span class="hint">新导入的参与者默认均已获授权；重复导入不会改变已撤回状态</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>2. 参与者（勾选后创建交付批次）</h2>
+    <div class="row" style="margin-bottom:8px">
+      <button class="primary" onclick="createBatch()">用选中参与者创建批次</button>
+      <button onclick="toggleAll(true)">全选</button>
+      <button onclick="toggleAll(false)">全不选</button>
+      <span class="hint">已撤回的参与者不可勾选；批次取创建时已授权的所选人员</span>
+    </div>
+    <table id="ptable">
+      <thead><tr><th></th><th>参与者编号</th><th>随访行数</th><th>授权状态</th><th>撤回时间</th><th>操作</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>3. 交付批次</h2>
+    <table id="btable">
+      <thead><tr><th>批次</th><th>状态</th><th>涉及人员</th><th>创建时间</th><th>说明</th><th>操作</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="hint">“慢速下载”用于演示：下载进行中撤回批次内某参与者的授权，下载会被立即中止，且该批次永久禁止再次下载；不相关批次不受影响。</p>
+  </section>
+
+  <section>
+    <h2>操作日志</h2>
+    <div id="log"></div>
+  </section>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function log(msg, obj) {
+  const t = new Date().toLocaleTimeString();
+  const line = obj !== undefined ? `${msg} ${JSON.stringify(obj)}` : msg;
+  $('#log').textContent += `[${t}] ${line}\n`;
+  $('#log').scrollTop = $('#log').scrollHeight;
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  let body = null;
+  try { body = await r.json(); } catch (e) { /* 非 JSON */ }
+  if (!r.ok) {
+    const detail = body && body.detail ? body.detail : `HTTP ${r.status}`;
+    throw new Error(detail);
+  }
+  return body;
+}
+
+async function uploadCsv() {
+  const f = $('#csvFile').files[0];
+  if (!f) { log('请先选择 CSV 文件'); return; }
+  const fd = new FormData();
+  fd.append('file', f);
+  try {
+    const r = await api('/api/import', { method: 'POST', body: fd });
+    log(`导入成功：${r.participants} 名参与者，${r.rows} 行随访`);
+  } catch (e) { log(`导入失败：${e.message}`); }
+  refresh();
+}
+
+async function importSample() {
+  try {
+    const r = await api('/api/import-sample', { method: 'POST' });
+    log(`示例数据导入成功：${r.participants} 名参与者，${r.rows} 行随访`);
+  } catch (e) { log(`示例导入失败：${e.message}`); }
+  refresh();
+}
+
+function toggleAll(v) {
+  document.querySelectorAll('#ptable input[type=checkbox]:not(:disabled)')
+    .forEach(c => c.checked = v);
+}
+
+async function createBatch() {
+  const ids = [...document.querySelectorAll('#ptable input[type=checkbox]:checked')]
+    .map(c => c.value);
+  if (!ids.length) { log('请先勾选参与者'); return; }
+  try {
+    const r = await api('/api/batches', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ participant_ids: ids }),
+    });
+    log(`批次 #${r.batch_id} 已创建，开始生成（${r.participants.length} 人）`);
+  } catch (e) { log(`创建批次被拒绝：${e.message}`); }
+  refresh();
+}
+
+async function revoke(pid) {
+  if (!confirm(`确认永久撤回 ${pid} 的授权？\n包含此人的生成作业与在途下载将被中止，相关批次永久禁止下载。`)) return;
+  log(`正在撤回 ${pid} 的授权（等待相关作业/下载停止）…`);
+  try {
+    const r = await api(`/api/participants/${encodeURIComponent(pid)}/revoke`, { method: 'POST' });
+    log(`撤回成功：${pid}`, r);
+  } catch (e) { log(`撤回失败：${e.message}`); }
+  refresh();
+}
+
+function statusTag(s) {
+  const map = {
+    generating: ['生成中', 'info'], ready: ['可下载', 'ok'],
+    failed: ['已失败', 'warn'], blocked: ['已封锁', 'bad'],
+  };
+  const [txt, cls] = map[s] || [s, 'warn'];
+  return `<span class="tag ${cls}">${txt}</span>`;
+}
+
+async function refresh() {
+  try {
+    // 刷新前记住勾选状态，渲染后恢复，避免轮询打断选择
+    const checked = new Set([...document.querySelectorAll('#ptable input[type=checkbox]:checked')]
+      .map(c => c.value));
+    const [ps, bs] = await Promise.all([api('/api/participants'), api('/api/batches')]);
+    $('#ptable tbody').innerHTML = ps.map(p => `
+      <tr>
+        <td><input type="checkbox" value="${esc(p.participant_id)}"
+             ${p.authorized ? (checked.has(p.participant_id) ? 'checked' : '') : 'disabled'}></td>
+        <td>${esc(p.participant_id)}</td>
+        <td>${p.visits}</td>
+        <td>${p.authorized ? '<span class="tag ok">已授权</span>' : '<span class="tag bad">已撤回</span>'}</td>
+        <td>${esc(p.revoked_at || '')}</td>
+        <td><button class="danger" ${p.authorized ? '' : 'disabled'} onclick="revoke('${esc(p.participant_id)}')">永久撤回</button></td>
+      </tr>`).join('');
+    $('#btable tbody').innerHTML = bs.map(b => `
+      <tr>
+        <td>#${b.id}</td>
+        <td>${statusTag(b.status)}</td>
+        <td>${esc(b.participants.join(', '))}</td>
+        <td>${esc((b.created_at || '').replace('T', ' ').slice(0, 19))}</td>
+        <td>${esc(b.error || '')}</td>
+        <td>${b.status === 'ready'
+          ? `<a class="dl" href="/api/batches/${b.id}/download">下载</a><a class="dl" href="/api/batches/${b.id}/download?slow=1">慢速下载</a>`
+          : '<span class="hint">不可下载</span>'}</td>
+      </tr>`).join('');
+  } catch (e) { /* 服务未就绪时下个周期重试 */ }
+}
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
